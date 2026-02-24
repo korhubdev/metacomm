@@ -9,16 +9,33 @@ from openai import OpenAI
 # =========================
 # Config
 # =========================
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # 사용자가 원하면 "gpt-4.1", "gpt-4.1-mini" 등으로 변경
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-
 st.set_page_config(page_title="금융소비자보호법 제21조 위반 점검(프로토타입)", layout="wide")
+
+# Secrets / Env / Default 우선순위로 모델/키를 가져오도록 구성
+def get_openai_api_key() -> str:
+    # 1) secrets(openai 섹션) -> 2) secrets 루트 -> 3) env
+    if "openai" in st.secrets and "OPENAI_API_KEY" in st.secrets["openai"]:
+        return st.secrets["openai"]["OPENAI_API_KEY"]
+    if "OPENAI_API_KEY" in st.secrets:
+        return st.secrets["OPENAI_API_KEY"]
+    return os.getenv("OPENAI_API_KEY", "")
+
+def get_openai_model() -> str:
+    # 1) secrets(openai 섹션) -> 2) secrets 루트 -> 3) env -> 4) default
+    if "openai" in st.secrets and "OPENAI_MODEL" in st.secrets["openai"]:
+        return st.secrets["openai"]["OPENAI_MODEL"]
+    if "OPENAI_MODEL" in st.secrets:
+        return st.secrets["OPENAI_MODEL"]
+    return os.getenv("OPENAI_MODEL", "gpt-4o")
+
+OPENAI_API_KEY = get_openai_api_key()
+MODEL = get_openai_model()
 
 # =========================
 # Helpers
 # =========================
 TIME_PATTERNS = [
-    r"^\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$",   # [00:12] 내용 / [00:01:12] 내용
+    r"^\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$",      # [00:12] 내용 / [00:01:12] 내용
     r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—]\s*(.*)$",  # 00:12 - 내용
 ]
 
@@ -30,7 +47,7 @@ def split_script_to_utterances(raw: str) -> List[Dict[str, Any]]:
     lines = [ln.strip() for ln in raw.splitlines()]
     lines = [ln for ln in lines if ln]  # 빈줄 제거
 
-    utterances = []
+    utterances: List[Dict[str, Any]] = []
     for i, ln in enumerate(lines, start=1):
         time_val = None
         text_val = ln
@@ -55,7 +72,6 @@ def build_prompt(utterances: List[Dict[str, Any]]) -> str:
     모델이 '제21조 위반 가능성'을 발언 단위로 판정하고,
     근거(조항/사유)를 구조화 JSON으로 내도록 유도.
     """
-    # 발언 리스트를 모델에 전달(식별자 포함)
     items = []
     for u in utterances:
         tag = f"{u['id']} (line {u['line_no']}" + (f", time {u['time']}" if u["time"] else "") + ")"
@@ -66,6 +82,8 @@ def build_prompt(utterances: List[Dict[str, Any]]) -> str:
 너는 '금융소비자보호법 제21조(부당권유행위 금지)' 준수 점검을 돕는 내부 준법감시 보조 모델이다.
 아래 상담/권유 발언 스크립트를 발언 단위로 분석하여, 제21조 위반 소지가 있는지 '가능성'을 판정하라.
 주의: 법률 자문이 아니라 사전 스크리닝이며, 모호하면 '추가정보필요' 또는 '주의'로 처리한다.
+
+중요: results 배열에는 각 utterance_id가 정확히 1번만 등장해야 한다.
 
 [출력 형식: 반드시 JSON만 출력]
 {{
@@ -100,27 +118,23 @@ def call_openai_for_analysis(model: str, utterances: List[Dict[str, Any]]) -> Di
     OpenAI Responses API 호출.
     """
     if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다. 환경변수로 설정해주세요.")
+        raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다. Streamlit secrets 또는 환경변수를 확인해주세요.")
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
     prompt = build_prompt(utterances)
 
-    # Responses API (권장) 사용: https://platform.openai.com/docs/api-reference/responses :contentReference[oaicite:2]{index=2}
     resp = client.responses.create(
         model=model,
         input=prompt,
-        # JSON만 출력하도록 강제(모델이 지키기 쉬움)
         text={"format": {"type": "json_object"}},
         temperature=0.2
     )
 
-    # resp.output_text 는 SDK에서 텍스트만 편하게 뽑아줌 (문서/예시 기반)
     raw = resp.output_text
     try:
         return json.loads(raw)
     except Exception as e:
-        # 모델이 JSON을 조금 깨뜨릴 때 대비: 최소한의 복구 시도
         raise RuntimeError(f"모델 응답 JSON 파싱 실패: {e}\n---raw---\n{raw}")
 
 def verdict_to_style(verdict: str) -> str:
@@ -130,7 +144,11 @@ def verdict_to_style(verdict: str) -> str:
         return "background-color:#fff3cd; color:#7a5a00; padding:2px 4px; border-radius:4px;"
     return ""  # CLEAR
 
-def build_left_highlight_html(utterances: List[Dict[str, Any]], results_map: Dict[str, Dict[str, Any]], focus_id: Optional[str]) -> str:
+def build_left_highlight_html(
+    utterances: List[Dict[str, Any]],
+    results_map: Dict[str, Dict[str, Any]],
+    focus_id: Optional[str]
+) -> str:
     """
     좌측 스크립트: 위반/주의 하이라이트 + focus_id면 굵은 테두리로 표시
     """
@@ -160,15 +178,21 @@ def build_left_highlight_html(utterances: List[Dict[str, Any]], results_map: Dic
     wrapper = "<div style='line-height:1.6;'>" + "\n".join(rows) + "</div>"
     return wrapper
 
-# =========================
-# UI
-# =========================
-st.title("금융소비자보호법 제21조 위반 점검")
+def dedupe_results_by_utterance_id(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    모델이 동일 utterance_id를 중복 출력할 때 UI 충돌을 막기 위해 dedupe.
+    뒤에 나온 결과를 우선으로 함.
+    """
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        uid = r.get("utterance_id")
+        if uid:
+            dedup[uid] = r
+    return list(dedup.values())
 
-with st.expander("설정", expanded=False):
-    model = st.text_input("OpenAI 모델명", value=DEFAULT_MODEL, help="예: gpt-4o, gpt-4.1, gpt-4.1-mini 등")
-    st.caption("OpenAI SDK/Responses API 기반으로 호출합니다. (신규 프로젝트 권장)")
-
+# =========================
+# Session State
+# =========================
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
 if "utterances" not in st.session_state:
@@ -177,6 +201,14 @@ if "focus_id" not in st.session_state:
     st.session_state.focus_id = None
 if "raw_script" not in st.session_state:
     st.session_state.raw_script = ""
+
+# =========================
+# UI
+# =========================
+st.title("금융소비자보호법 제21조 위반 점검(프로토타입)")
+
+# 설정 UI(Expander) 제거: MODEL은 secrets/env에서 자동 선택
+st.caption(f"모델: {MODEL} / API Key: {'설정됨' if bool(OPENAI_API_KEY) else '미설정'}")
 
 st.subheader("1) 스크립트 입력")
 
@@ -201,27 +233,26 @@ if analyze:
     else:
         with st.spinner("분석 중..."):
             try:
-                analysis = call_openai_for_analysis(model, utterances)
+                analysis = call_openai_for_analysis(MODEL, utterances)
                 st.session_state.analysis = analysis
                 st.session_state.focus_id = None
             except Exception as e:
                 st.error(str(e))
 
 st.divider()
-
 st.subheader("2) 분석 결과")
 
 if not st.session_state.analysis:
-    st.info("왼쪽 입력창에 스크립트를 넣고 **분석하기**를 눌러주세요.")
+    st.info("위 입력창에 스크립트를 넣고 **분석하기**를 눌러주세요.")
 else:
     analysis = st.session_state.analysis
     utterances = st.session_state.utterances
     focus_id = st.session_state.focus_id
 
-    # 결과 매핑
     results = analysis.get("results", [])
+    results = dedupe_results_by_utterance_id(results)
+
     results_map = {r.get("utterance_id"): r for r in results if r.get("utterance_id")}
-    has_violation = bool(analysis.get("summary", {}).get("has_violation", False))
 
     left, right = st.columns([1.25, 1])
 
@@ -232,24 +263,24 @@ else:
         st.markdown(html, unsafe_allow_html=True)
 
         if focus_id:
-            # streamlit에서 '스크롤 이동'이 제한적이라, focus 정보를 별도 안내
             fu = next((u for u in utterances if u["id"] == focus_id), None)
             if fu:
-                st.caption(f"선택됨 → {fu['id']} / line {fu['line_no']} " + (f"/ time {fu['time']}" if fu["time"] else ""))
+                st.caption(
+                    f"선택됨 → {fu['id']} / line {fu['line_no']}"
+                    + (f" / time {fu['time']}" if fu["time"] else "")
+                )
 
     # ---- RIGHT: reasons + jump
     with right:
         st.markdown("#### 위반 근거 / 발언별 조치")
 
-        # 요약
         summ = analysis.get("summary", {})
         st.write(f"- **Risk Level**: {summ.get('risk_level', 'N/A')}")
         st.write(f"- **Note**: {summ.get('overall_note', '')}")
 
         st.markdown("---")
 
-        # 발언별 카드
-        for r in results:
+        for idx, r in enumerate(results):
             uid = r.get("utterance_id", "unknown")
             verdict = r.get("verdict", "CLEAR")
             law_ref = r.get("law_reference", "")
@@ -257,7 +288,6 @@ else:
             fix = r.get("suggested_fix", "")
             conf = r.get("confidence", None)
 
-            # 원문 찾기
             u = next((x for x in utterances if x["id"] == uid), None)
             line_meta = ""
             if u:
@@ -279,14 +309,13 @@ else:
                 if conf is not None:
                     st.caption(f"confidence: {conf}")
 
-                # 이동하기 버튼(스트림릿 스크롤 한계가 있어 focus 표시 + 메타 제공)
-                if st.button("이동하기", key=f"jump_{uid}"):
+                # key 유니크 보장(중복키 에러 방지)
+                if st.button("이동하기", key=f"jump_{uid}_{idx}"):
                     st.session_state.focus_id = uid
                     st.rerun()
 
         st.markdown("---")
 
-        # 우측 하단 결과 화면
         st.markdown("#### 최종 판정")
         if any(r.get("verdict") == "VIOLATION" for r in results):
             st.error("고위험 준법 감시팀 알람 발생")
