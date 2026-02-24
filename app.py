@@ -7,13 +7,18 @@ import streamlit as st
 from openai import OpenAI
 
 # =========================
-# Config
+# Page Config
 # =========================
-st.set_page_config(page_title="금융소비자보호법 제21조 위반 점검(프로토타입)", layout="wide")
+st.set_page_config(
+    page_title="금융소비자보호법 제21조 위반 점검(프로토타입)",
+    layout="wide"
+)
 
-# Secrets / Env / Default 우선순위로 모델/키를 가져오도록 구성
+# =========================
+# Secrets / Env Config
+# =========================
 def get_openai_api_key() -> str:
-    # 1) secrets(openai 섹션) -> 2) secrets 루트 -> 3) env
+    # 1) secrets [openai] 섹션 -> 2) secrets 루트 -> 3) env
     if "openai" in st.secrets and "OPENAI_API_KEY" in st.secrets["openai"]:
         return st.secrets["openai"]["OPENAI_API_KEY"]
     if "OPENAI_API_KEY" in st.secrets:
@@ -21,7 +26,7 @@ def get_openai_api_key() -> str:
     return os.getenv("OPENAI_API_KEY", "")
 
 def get_openai_model() -> str:
-    # 1) secrets(openai 섹션) -> 2) secrets 루트 -> 3) env -> 4) default
+    # 화면에는 표시하지 않지만 내부적으로만 사용
     if "openai" in st.secrets and "OPENAI_MODEL" in st.secrets["openai"]:
         return st.secrets["openai"]["OPENAI_MODEL"]
     if "OPENAI_MODEL" in st.secrets:
@@ -35,8 +40,8 @@ MODEL = get_openai_model()
 # Helpers
 # =========================
 TIME_PATTERNS = [
-    r"^\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$",      # [00:12] 내용 / [00:01:12] 내용
-    r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—]\s*(.*)$",  # 00:12 - 내용
+    r"^\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$",       # [00:12] 내용 / [00:01:12] 내용
+    r"^\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—]\s*(.*)$",   # 00:12 - 내용
 ]
 
 def split_script_to_utterances(raw: str) -> List[Dict[str, Any]]:
@@ -44,16 +49,17 @@ def split_script_to_utterances(raw: str) -> List[Dict[str, Any]]:
     사용자가 넣은 원문을 라인 단위 발언으로 분해.
     시간표기가 있으면 time에 저장.
     """
-    lines = [ln.strip() for ln in raw.splitlines()]
-    lines = [ln for ln in lines if ln]  # 빈줄 제거
+    lines = [ln.rstrip() for ln in raw.splitlines()]
+    lines = [ln for ln in lines if ln.strip()]  # 빈줄 제거
 
     utterances: List[Dict[str, Any]] = []
     for i, ln in enumerate(lines, start=1):
+        line = ln.strip()
         time_val = None
-        text_val = ln
+        text_val = line
 
         for pat in TIME_PATTERNS:
-            m = re.match(pat, ln)
+            m = re.match(pat, line)
             if m:
                 time_val = m.group(1)
                 text_val = m.group(2).strip()
@@ -63,7 +69,8 @@ def split_script_to_utterances(raw: str) -> List[Dict[str, Any]]:
             "id": f"u{i}",
             "line_no": i,
             "time": time_val,
-            "text": text_val
+            "text": text_val,
+            "raw_line": line,   # 좌측에 그대로 보여줄 원문
         })
     return utterances
 
@@ -81,7 +88,7 @@ def build_prompt(utterances: List[Dict[str, Any]]) -> str:
     return f"""
 너는 '금융소비자보호법 제21조(부당권유행위 금지)' 준수 점검을 돕는 내부 준법감시 보조 모델이다.
 아래 상담/권유 발언 스크립트를 발언 단위로 분석하여, 제21조 위반 소지가 있는지 '가능성'을 판정하라.
-주의: 법률 자문이 아니라 사전 스크리닝이며, 모호하면 '추가정보필요' 또는 '주의'로 처리한다.
+주의: 법률 자문이 아니라 사전 스크리닝이며, 모호하면 '주의'로 처리한다.
 
 중요: results 배열에는 각 utterance_id가 정확히 1번만 등장해야 한다.
 
@@ -121,7 +128,6 @@ def call_openai_for_analysis(model: str, utterances: List[Dict[str, Any]]) -> Di
         raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다. Streamlit secrets 또는 환경변수를 확인해주세요.")
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     prompt = build_prompt(utterances)
 
     resp = client.responses.create(
@@ -137,50 +143,9 @@ def call_openai_for_analysis(model: str, utterances: List[Dict[str, Any]]) -> Di
     except Exception as e:
         raise RuntimeError(f"모델 응답 JSON 파싱 실패: {e}\n---raw---\n{raw}")
 
-def verdict_to_style(verdict: str) -> str:
-    if verdict == "VIOLATION":
-        return "background-color:#ffdddd; color:#a40000; padding:2px 4px; border-radius:4px;"
-    if verdict == "CAUTION":
-        return "background-color:#fff3cd; color:#7a5a00; padding:2px 4px; border-radius:4px;"
-    return ""  # CLEAR
-
-def build_left_highlight_html(
-    utterances: List[Dict[str, Any]],
-    results_map: Dict[str, Dict[str, Any]],
-    focus_id: Optional[str]
-) -> str:
-    """
-    좌측 스크립트: 위반/주의 하이라이트 + focus_id면 굵은 테두리로 표시
-    """
-    rows = []
-    for u in utterances:
-        r = results_map.get(u["id"], {"verdict": "CLEAR"})
-        verdict = r.get("verdict", "CLEAR")
-        style = verdict_to_style(verdict)
-
-        border = ""
-        if focus_id and u["id"] == focus_id:
-            border = "border:2px solid #333; padding:6px; border-radius:8px;"
-
-        time_txt = f"[{u['time']}] " if u["time"] else ""
-        meta = f"<span style='color:#888;'>({u['id']} / line {u['line_no']})</span>"
-
-        line_html = f"""
-        <div id="{u['id']}" style="margin:6px 0; {border}">
-          <div style="font-size:14px;">
-            <span style="{style}">{time_txt}{u['text']}</span>
-            <span style="margin-left:8px;">{meta}</span>
-          </div>
-        </div>
-        """
-        rows.append(line_html)
-
-    wrapper = "<div style='line-height:1.6;'>" + "\n".join(rows) + "</div>"
-    return wrapper
-
 def dedupe_results_by_utterance_id(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    모델이 동일 utterance_id를 중복 출력할 때 UI 충돌을 막기 위해 dedupe.
+    모델이 동일 utterance_id를 중복 출력할 때 UI 충돌 방지를 위해 dedupe.
     뒤에 나온 결과를 우선으로 함.
     """
     dedup: Dict[str, Dict[str, Any]] = {}
@@ -210,10 +175,10 @@ st.title("금융소비자보호법 제21조 위반 점검(프로토타입)")
 st.subheader("1) 스크립트 입력")
 
 raw = st.text_area(
-    "상담/권유 대화 스크립트를 붙여넣으세요 (라인 단위로 발언 분리). 시간표기가 있으면 [00:12] 형태 권장.",
+    "상담/권유 대화 스크립트를 붙여넣으세요 (라인 단위로 발언 분리).",
     height=220,
     value=st.session_state.raw_script,
-    placeholder="[00:01] 안녕하세요 고객님...\n[00:05] 이 상품은 원금 손실 가능성이 전혀 없습니다...\n..."
+    placeholder="직원: 안녕하세요 고객님...\n고객: 네...\n..."
 )
 
 col_btn1, col_btn2 = st.columns([1, 5])
@@ -248,16 +213,17 @@ else:
 
     results = analysis.get("results", [])
     results = dedupe_results_by_utterance_id(results)
-
     results_map = {r.get("utterance_id"): r for r in results if r.get("utterance_id")}
 
     left, right = st.columns([1.25, 1])
 
-    # ---- LEFT: highlighted script
+    # ---- LEFT: 원문만 그대로 출력 (하이라이트/HTML 없음)
     with left:
-        st.markdown("#### 스크립트(위반/주의 하이라이트)")
-        html = build_left_highlight_html(utterances, results_map, focus_id)
-        st.markdown(html, unsafe_allow_html=True)
+        st.markdown("#### 스크립트(원문)")
+        for u in utterances:
+            prefix = "👉 " if (focus_id and u["id"] == focus_id) else ""
+            # 원문 그대로(사용자가 입력한 라인)
+            st.write(f"{prefix}{u['raw_line']}")
 
         if focus_id:
             fu = next((u for u in utterances if u["id"] == focus_id), None)
@@ -267,7 +233,7 @@ else:
                     + (f" / time {fu['time']}" if fu["time"] else "")
                 )
 
-    # ---- RIGHT: reasons + jump
+    # ---- RIGHT: 위반 근거 + 이동하기
     with right:
         st.markdown("#### 위반 근거 / 발언별 조치")
 
@@ -306,7 +272,7 @@ else:
                 if conf is not None:
                     st.caption(f"confidence: {conf}")
 
-                # key 유니크 보장(중복키 에러 방지)
+                # 버튼 key 유니크 보장
                 if st.button("이동하기", key=f"jump_{uid}_{idx}"):
                     st.session_state.focus_id = uid
                     st.rerun()
