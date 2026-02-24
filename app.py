@@ -165,9 +165,9 @@ def build_left_highlight_html(utterances: List[Dict[str, Any]], results_map: Dic
 # =========================
 st.title("금융소비자보호법 제21조 위반 점검")
 
-# with st.expander("설정", expanded=False):
-#     model = st.text_input("OpenAI 모델명", value=DEFAULT_MODEL, help="예: gpt-4o, gpt-4.1, gpt-4.1-mini 등")
-#     st.caption("OpenAI SDK/Responses API 기반으로 호출합니다. (신규 프로젝트 권장)")
+with st.expander("설정", expanded=False):
+    model = st.text_input("OpenAI 모델명", value=DEFAULT_MODEL, help="예: gpt-4o, gpt-4.1, gpt-4.1-mini 등")
+    st.caption("OpenAI SDK/Responses API 기반으로 호출합니다. (신규 프로젝트 권장)")
 
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
