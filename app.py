@@ -207,9 +207,6 @@ if "raw_script" not in st.session_state:
 # =========================
 st.title("금융소비자보호법 제21조 위반 점검(프로토타입)")
 
-# 설정 UI(Expander) 제거: MODEL은 secrets/env에서 자동 선택
-st.caption(f"모델: {MODEL} / API Key: {'설정됨' if bool(OPENAI_API_KEY) else '미설정'}")
-
 st.subheader("1) 스크립트 입력")
 
 raw = st.text_area(
